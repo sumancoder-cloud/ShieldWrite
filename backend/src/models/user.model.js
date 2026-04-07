@@ -43,6 +43,10 @@ const userSchema=new mongoose.Schema(
         accountBlocked:{
             type:Boolean,
             default:false
+        },
+        lockuntil:{
+            type:Date,
+            default:null
         }
     },
     {
