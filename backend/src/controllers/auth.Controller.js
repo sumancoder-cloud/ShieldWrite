@@ -1,5 +1,6 @@
 const User=require('../models/user.model')
 const argon2=require('argon2')
+const jwt=require('jsonwebtoken')
 
 const signup=async(req,res)=>{
     try{
@@ -40,6 +41,7 @@ const signup=async(req,res)=>{
 const login=async(req,res)=>{
     try{
         const {email,password}=req.body;
+        
         if(!email || !password){
             return res.status(400).json({
                 success:false,
@@ -53,6 +55,7 @@ const login=async(req,res)=>{
                 message:"User is not Registered"
             })
         }
+       
          if(userExists.accountBlocked){
             if(userExists.lockuntil && userExists.lockuntil >Date.now()){
 
@@ -82,30 +85,46 @@ const login=async(req,res)=>{
                     message:"Account Locked due to multiple failed attempts"
                 })
             }
+             
 
             await userExists.save();
             return res.status(400).json({
                 success:false,
                 message:"Credentials are invalid"
             })
+            
         }else{
+            const token=await jwt.sign(
+            {
+                id:userExists._id,
+                role:userExists.role
+            },
+            process.env.JWT_SECRET,
+            {
+                expiresIn:"2d"
+            }
+        )
             userExists.failedLoginAttempts=0;
             await userExists.save();
             return res.status(200).json({
                 success:true,
                 message:"Login was SuccessFull...!",
+                token,
                 user:{
                     id:userExists._id,
                     email:userExists.email,
                     role:userExists.role
                 }
 
+
             })
+
         }
     }catch(error){
         res.status(500).json({
             success:false,
-            message:"Internal Server Error...!"
+            message:"Internal Server Error...!",
+            err:error.message
         })
     }
 }
