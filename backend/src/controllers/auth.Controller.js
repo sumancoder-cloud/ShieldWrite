@@ -260,29 +260,12 @@ const signup=async(req,res)=>{
             role:userRole,
             adminApproved:userRole === 'admin' ? isMainAdmin : true,
             isSuperAdmin:isMainAdmin,
-            emailVerified:isMainAdmin
+            emailVerified:true
         });
-
-        if(!newUser.emailVerified){
-            const verifyToken=createEmailVerificationToken(newUser._id.toString());
-            newUser.emailVerificationTokenHash=hashToken(verifyToken);
-            const decoded=jwt.decode(verifyToken);
-            newUser.emailVerificationExpiresAt=new Date(decoded.exp * 1000);
-            await newUser.save();
-
-            const verificationUrl=`${FRONTEND_URL}/login?verifyToken=${encodeURIComponent(verifyToken)}`;
-            await sendEmailVerificationEmail({
-                to:newUser.email,
-                firstName:newUser.firstName,
-                verificationUrl
-            });
-        }
 
         return res.status(201).json({
             success:true,
-            message:!newUser.emailVerified
-                ? 'Account created. Please verify your email before logging in.'
-                : (userRole === 'admin' && !newUser.adminApproved
+            message:(userRole === 'admin' && !newUser.adminApproved
                 ? 'Admin signup request submitted. Wait for super admin approval.'
                 : 'User created successfully'),
             user:{
@@ -335,13 +318,6 @@ const login=async(req,res)=>{
             return res.status(401).json({
                 success:false,
                 message:'Selected role does not match your account role'
-            });
-        }
-
-        if(!user.emailVerified){
-            return res.status(403).json({
-                success:false,
-                message:'Email not verified. Please verify your email before login.'
             });
         }
 

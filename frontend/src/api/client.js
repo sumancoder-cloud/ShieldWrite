@@ -31,6 +31,7 @@ client.interceptors.response.use(
       '/api/auth/login',
       '/api/auth/signup',
       '/api/auth/verify-otp',
+      '/api/auth/me',
       '/api/auth/refresh-token',
       '/api/auth/verify-email',
       '/api/auth/resend-verification',

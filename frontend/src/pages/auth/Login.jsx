@@ -1,6 +1,6 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { useLocation } from 'wouter';
-import { login, verifyEmail, resendVerification } from '../../api/auth.js';
+import { login } from '../../api/auth.js';
 import { getApiError } from '../../api/client.js';
 import { useToast } from '../../components/common/Toast.jsx';
 import BubbleBackground from '../../components/BubbleBackground.jsx';
@@ -14,26 +14,6 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
   const [form, setForm] = useState({ email: '', password: '', role: 'user' });
   const [errors, setErrors] = useState({});
-  const [resendingVerification, setResendingVerification] = useState(false);
-
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const token = params.get('verifyToken');
-    if (!token) return;
-
-    (async () => {
-      try {
-        const data = await verifyEmail(token);
-        addToast(data?.message || 'Email verified successfully.', 'success');
-      } catch (err) {
-        addToast(getApiError(err), 'error');
-      } finally {
-        params.delete('verifyToken');
-        const next = params.toString();
-        window.history.replaceState({}, '', `${window.location.pathname}${next ? `?${next}` : ''}`);
-      }
-    })();
-  }, [addToast]);
 
   const validate = () => {
     const e = {};
@@ -68,27 +48,8 @@ export default function Login() {
     } catch (err) {
       const message = getApiError(err);
       addToast(message, 'error');
-      if (message.toLowerCase().includes('email not verified') && form.email) {
-        setErrors((prev) => ({ ...prev, email: 'Email not verified. Please verify from inbox.' }));
-      }
     } finally {
       setLoading(false);
-    }
-  };
-
-  const resendVerificationEmail = async () => {
-    if (!form.email?.trim()) {
-      setErrors((prev) => ({ ...prev, email: 'Enter your email first to resend verification' }));
-      return;
-    }
-    setResendingVerification(true);
-    try {
-      const data = await resendVerification(form.email);
-      addToast(data?.message || 'Verification email sent.', 'success');
-    } catch (err) {
-      addToast(getApiError(err), 'error');
-    } finally {
-      setResendingVerification(false);
     }
   };
 
@@ -151,15 +112,6 @@ export default function Login() {
               Sign In
               <ArrowRight className="w-4 h-4" />
             </Button>
-
-            <button
-              type="button"
-              onClick={resendVerificationEmail}
-              disabled={resendingVerification}
-              className="w-full text-sm text-primary hover:underline disabled:opacity-70"
-            >
-              {resendingVerification ? 'Sending verification email...' : 'Resend verification email'}
-            </button>
           </form>
 
           <p className="text-center text-sm text-muted-foreground mt-6">
