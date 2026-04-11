@@ -29,7 +29,8 @@ const blogSchema=new mongoose.Schema(
         },
         status:{
             type:String,
-            enum:["draft","published"]
+            enum:["draft","published"],
+            default:"draft"
         }
     },
     {
@@ -37,6 +38,8 @@ const blogSchema=new mongoose.Schema(
     }
 
 )
+
+blogSchema.index({ author: 1, createdAt: -1 });
 
 const Blog=mongoose.model("Blog",blogSchema);
 

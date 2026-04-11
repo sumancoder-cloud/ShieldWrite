@@ -1,45 +1,43 @@
-const jwt=require('jsonwebtoken')
-const User=require('../models/user.model')
-const auth=async(req,res,next)=>{
+const jwt=require('jsonwebtoken');
+
+const auth=(req,res,next)=>{
     try{
-        const token=req.headers.authorization;
-        if(!token){
+        const authorization=req.headers.authorization || '';
+        const [scheme,token]=authorization.split(' ');
+
+        if(scheme !== 'Bearer' || !token){
             return res.status(401).json({
                 success:false,
-                message:"Token missing"
-            })
+                message:'Authorization token missing or malformed'
+            });
         }
 
-        const decoded=await jwt.verify(token,process.env.JWT_SECRET);
-        req.user=decoded;
-        next();
+        const decoded=jwt.verify(token,process.env.JWT_SECRET);
+        req.user={
+            id:decoded.id,
+            role:decoded.role
+        };
+        return next();
 
     }catch(error){
         return res.status(401).json({
             success:false,
-            message:"Invalid Token"
-        })
+            message:'Invalid or expired token'
+        });
     }
-}
+};
 
 const authorize=(...roles)=>{
     return (req,res,next)=>{
-        try{
-            const userRole=req.user.role
-        if(!roles.includes(userRole)){
-            return res.json(403).json({
+        const userRole=req.user?.role;
+        if(!userRole || !roles.includes(userRole)){
+            return res.status(403).json({
                 success:false,
-                message:"Access Denied."
-            })
+                message:'Access denied'
+            });
         }
-        next();
-        }catch(error){
-            return res.status(500).json({
-                succcess:false,
-                message:"Internal Server Error",
-                mes:error.message
-            })
-        }
-    }
-}
+        return next();
+    };
+};
+
 module.exports={auth,authorize};
