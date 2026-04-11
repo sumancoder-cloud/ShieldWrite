@@ -1,23 +1,72 @@
 const argon2=require('argon2');
 const crypto=require('crypto');
 const jwt=require('jsonwebtoken');
+const speakeasy=require('speakeasy');
+const QRCode=require('qrcode');
 const User=require('../models/user.model');
 const RefreshToken=require('../models/refreshToken.model');
 const { getRedisClient, isRedisConnected } = require('../config/redis');
 const { generateOtp } = require('../utils/otp');
+const { sendOtpEmail, sendEmailVerificationEmail, sendSecurityAlertEmail } = require('../utils/email');
 
 const MAX_FAILED_ATTEMPTS=Number(process.env.MAX_FAILED_ATTEMPTS || 3);
-const ACCOUNT_LOCK_MINUTES=Number(process.env.ACCOUNT_LOCK_MINUTES || 15);
+const ACCOUNT_LOCK_MINUTES=Number(process.env.ACCOUNT_LOCK_MINUTES || 1);
 const OTP_TTL_SECONDS=Number(process.env.OTP_TTL_SECONDS || 300);
 const OTP_MAX_VERIFY_ATTEMPTS=Number(process.env.OTP_MAX_VERIFY_ATTEMPTS || 5);
 const ACCESS_TOKEN_EXPIRES_IN=process.env.JWT_EXPIRES_IN || '2d';
 const MFA_TOKEN_EXPIRES_IN=process.env.MFA_TOKEN_EXPIRES_IN || '10m';
 const REFRESH_TOKEN_EXPIRES_IN=process.env.REFRESH_TOKEN_EXPIRES_IN || '7d';
 const REFRESH_TOKEN_SECRET=process.env.REFRESH_TOKEN_SECRET || process.env.JWT_SECRET;
-
-const otpFallbackStore=new Map();
+const EMAIL_VERIFY_EXPIRES_IN=process.env.EMAIL_VERIFY_EXPIRES_IN || '24h';
+const FRONTEND_URL=process.env.FRONTEND_URL || 'http://localhost:5173';
 
 const normalizeEmail=(email='')=>email.trim().toLowerCase();
+const MAIN_ADMIN_EMAIL=normalizeEmail(process.env.MAIN_ADMIN_EMAIL || 'suman.tati2005@gmail.com');
+const SECURITY_ALERT_EMAIL=normalizeEmail(process.env.SECURITY_ALERT_EMAIL || process.env.MAIN_ADMIN_EMAIL || 'suman.tati2005@gmail.com');
+
+const validateStrongPassword=(password='')=>{
+    const value=String(password);
+    if(value.length < 12){
+        return 'Password must be at least 12 characters long';
+    }
+
+    const hasUpper=/[A-Z]/.test(value);
+    const hasLower=/[a-z]/.test(value);
+    const hasDigit=/\d/.test(value);
+    const hasSpecial=/[^A-Za-z0-9]/.test(value);
+    if(!hasUpper || !hasLower || !hasDigit || !hasSpecial){
+        return 'Password must include uppercase, lowercase, number, and special character';
+    }
+    return null;
+};
+
+const parseCookieMaxAge=(expiresIn)=>{
+    if(typeof expiresIn === 'number') return expiresIn * 1000;
+    const value=String(expiresIn || '').trim();
+    const match=value.match(/^(\d+)([smhd])$/i);
+    if(!match) return 7 * 24 * 60 * 60 * 1000;
+    const n=Number(match[1]);
+    const unit=match[2].toLowerCase();
+    const map={ s:1000, m:60*1000, h:60*60*1000, d:24*60*60*1000 };
+    return n * map[unit];
+};
+
+const cookieBaseOptions={
+    httpOnly:true,
+    secure:process.env.NODE_ENV === 'production',
+    sameSite:'lax',
+    path:'/'
+};
+
+const setAuthCookies=(res,{ accessToken, refreshToken })=>{
+    res.cookie('sw_access_token',accessToken,{ ...cookieBaseOptions, maxAge:parseCookieMaxAge(ACCESS_TOKEN_EXPIRES_IN) });
+    res.cookie('sw_refresh_token',refreshToken,{ ...cookieBaseOptions, maxAge:parseCookieMaxAge(REFRESH_TOKEN_EXPIRES_IN) });
+};
+
+const clearAuthCookies=(res)=>{
+    res.clearCookie('sw_access_token',cookieBaseOptions);
+    res.clearCookie('sw_refresh_token',cookieBaseOptions);
+};
 
 const hashToken=(token)=>crypto.createHash('sha256').update(token).digest('hex');
 
@@ -41,6 +90,18 @@ const createMfaToken=(userId,mfaSessionId)=>jwt.sign(
     process.env.JWT_SECRET,
     {
         expiresIn:MFA_TOKEN_EXPIRES_IN
+    }
+);
+
+const createEmailVerificationToken=(userId)=>jwt.sign(
+    {
+        id:userId,
+        purpose:'email-verify',
+        nonce:crypto.randomBytes(16).toString('hex')
+    },
+    process.env.JWT_SECRET,
+    {
+        expiresIn:EMAIL_VERIFY_EXPIRES_IN
     }
 );
 
@@ -121,51 +182,40 @@ const saveOtpSession=async({userId,mfaSessionId,otp})=>{
     const key=`mfa:otp:${userId}:${mfaSessionId}`;
     const redisClient=getRedisClient();
 
-    if(isRedisConnected() && redisClient){
-        await redisClient.setEx(key,OTP_TTL_SECONDS,JSON.stringify(payload));
-        return key;
+    if(!isRedisConnected() || !redisClient){
+        throw new Error('Redis is unavailable for OTP session storage');
     }
 
-    otpFallbackStore.set(key,{ ...payload, expiresAt:Date.now()+OTP_TTL_SECONDS*1000 });
+    await redisClient.setEx(key,OTP_TTL_SECONDS,JSON.stringify(payload));
     return key;
 };
 
 const readOtpSession=async(key)=>{
     const redisClient=getRedisClient();
-    if(isRedisConnected() && redisClient){
-        const value=await redisClient.get(key);
-        return value ? JSON.parse(value) : null;
+    if(!isRedisConnected() || !redisClient){
+        throw new Error('Redis is unavailable for OTP session read');
     }
 
-    const fallbackValue=otpFallbackStore.get(key);
-    if(!fallbackValue){
-        return null;
-    }
-    if(fallbackValue.expiresAt <= Date.now()){
-        otpFallbackStore.delete(key);
-        return null;
-    }
-    return fallbackValue;
+    const value=await redisClient.get(key);
+    return value ? JSON.parse(value) : null;
 };
 
 const writeOtpSession=async(key,data)=>{
     const redisClient=getRedisClient();
-    if(isRedisConnected() && redisClient){
-        await redisClient.setEx(key,OTP_TTL_SECONDS,JSON.stringify(data));
-        return;
+    if(!isRedisConnected() || !redisClient){
+        throw new Error('Redis is unavailable for OTP session write');
     }
 
-    otpFallbackStore.set(key,{ ...data, expiresAt:Date.now()+OTP_TTL_SECONDS*1000 });
+    await redisClient.setEx(key,OTP_TTL_SECONDS,JSON.stringify(data));
 };
 
 const deleteOtpSession=async(key)=>{
     const redisClient=getRedisClient();
-    if(isRedisConnected() && redisClient){
-        await redisClient.del(key);
-        return;
+    if(!isRedisConnected() || !redisClient){
+        throw new Error('Redis is unavailable for OTP session delete');
     }
 
-    otpFallbackStore.delete(key);
+    await redisClient.del(key);
 };
 
 const signup=async(req,res)=>{
@@ -179,10 +229,11 @@ const signup=async(req,res)=>{
             });
         }
 
-        if(String(password).length < 8){
+        const passwordError=validateStrongPassword(password);
+        if(passwordError){
             return res.status(400).json({
                 success:false,
-                message:'Password must be at least 8 characters long'
+                message:passwordError
             });
         }
 
@@ -196,7 +247,9 @@ const signup=async(req,res)=>{
         }
 
         const hashedPassword=await argon2.hash(password);
-        const userRole=role === 'admin' ? 'admin' : 'user';
+        const normalizedMainAdminEmail=normalizeEmail(MAIN_ADMIN_EMAIL);
+        const isMainAdmin=normalizeEmail(normalizedEmail) === normalizedMainAdminEmail;
+        const userRole=isMainAdmin ? 'admin' : (role === 'admin' ? 'admin' : 'user');
 
         const newUser=await User.create({
             firstName:firstName.trim(),
@@ -204,20 +257,52 @@ const signup=async(req,res)=>{
             age:Number(age),
             email:normalizedEmail,
             password:hashedPassword,
-            role:userRole
+            role:userRole,
+            adminApproved:userRole === 'admin' ? isMainAdmin : true,
+            isSuperAdmin:isMainAdmin,
+            emailVerified:isMainAdmin
         });
+
+        if(!newUser.emailVerified){
+            const verifyToken=createEmailVerificationToken(newUser._id.toString());
+            newUser.emailVerificationTokenHash=hashToken(verifyToken);
+            const decoded=jwt.decode(verifyToken);
+            newUser.emailVerificationExpiresAt=new Date(decoded.exp * 1000);
+            await newUser.save();
+
+            const verificationUrl=`${FRONTEND_URL}/login?verifyToken=${encodeURIComponent(verifyToken)}`;
+            await sendEmailVerificationEmail({
+                to:newUser.email,
+                firstName:newUser.firstName,
+                verificationUrl
+            });
+        }
 
         return res.status(201).json({
             success:true,
-            message:'User created successfully',
+            message:!newUser.emailVerified
+                ? 'Account created. Please verify your email before logging in.'
+                : (userRole === 'admin' && !newUser.adminApproved
+                ? 'Admin signup request submitted. Wait for super admin approval.'
+                : 'User created successfully'),
             user:{
                 id:newUser._id,
                 email:newUser.email,
-                role:newUser.role
+                role:newUser.role,
+                adminApproved:newUser.adminApproved,
+                isSuperAdmin:newUser.isSuperAdmin,
+                emailVerified:newUser.emailVerified
             }
         });
 
     }catch(error){
+        if(error.message && error.message.includes('Redis is unavailable')){
+            return res.status(503).json({
+                success:false,
+                message:'Redis service unavailable. OTP flow requires Redis.'
+            });
+        }
+
         return res.status(500).json({
             success:false,
             message:'Internal server error',
@@ -228,7 +313,7 @@ const signup=async(req,res)=>{
 
 const login=async(req,res)=>{
     try{
-        const {email,password}=req.body;
+        const {email,password,role}=req.body;
 
         if(!email || !password){
             return res.status(400).json({
@@ -243,6 +328,27 @@ const login=async(req,res)=>{
             return res.status(401).json({
                 success:false,
                 message:'Invalid credentials'
+            });
+        }
+
+        if(role && role !== user.role){
+            return res.status(401).json({
+                success:false,
+                message:'Selected role does not match your account role'
+            });
+        }
+
+        if(!user.emailVerified){
+            return res.status(403).json({
+                success:false,
+                message:'Email not verified. Please verify your email before login.'
+            });
+        }
+
+        if(user.role === 'admin' && !user.adminApproved){
+            return res.status(403).json({
+                success:false,
+                message:'Admin access pending approval by main administrator'
             });
         }
 
@@ -268,9 +374,24 @@ const login=async(req,res)=>{
             if(user.failedLoginAttempts >= MAX_FAILED_ATTEMPTS){
                 user.accountBlocked=true;
                 user.lockUntil=new Date(Date.now() + ACCOUNT_LOCK_MINUTES*60*1000);
+                await sendSecurityAlertEmail({
+                    to:SECURITY_ALERT_EMAIL,
+                    subject:'ShieldWrite alert: account locked',
+                    message:`Account ${user.email} locked after repeated failed login attempts.`,
+                    details:`IP: ${req.ip}\nUser-Agent: ${req.headers['user-agent'] || 'unknown'}`
+                });
             }
 
             await user.save();
+
+            if(user.failedLoginAttempts >= 2){
+                await sendSecurityAlertEmail({
+                    to:SECURITY_ALERT_EMAIL,
+                    subject:'ShieldWrite alert: suspicious login failures',
+                    message:`Repeated failed login attempts for ${user.email}.`,
+                    details:`Attempts: ${user.failedLoginAttempts}\nIP: ${req.ip}\nUser-Agent: ${req.headers['user-agent'] || 'unknown'}`
+                });
+            }
 
             return res.status(401).json({
                 success:false,
@@ -291,18 +412,29 @@ const login=async(req,res)=>{
             otp
         });
 
+        await sendOtpEmail({
+            to:user.email,
+            firstName:user.firstName,
+            otp
+        });
+
         const mfaToken=createMfaToken(user._id,mfaSessionId);
 
-        // In production, deliver OTP through email/SMS provider instead of returning it.
         return res.status(200).json({
             success:true,
             message:'Password verified. Complete MFA with OTP.',
             mfaRequired:true,
-            mfaToken,
-            otpPreview:process.env.NODE_ENV === 'production' ? undefined : otp
+            mfaToken
         });
 
     }catch(error){
+        if(error.message && error.message.includes('Redis is unavailable')){
+            return res.status(503).json({
+                success:false,
+                message:'Redis service unavailable. OTP flow requires Redis.'
+            });
+        }
+
         return res.status(500).json({
             success:false,
             message:'Internal server error',
@@ -386,17 +518,19 @@ const verifyOtp=async(req,res)=>{
 
         const token=createAccessToken(user);
         const refreshToken=await issueRefreshToken(user._id.toString());
+        setAuthCookies(res,{ accessToken:token, refreshToken });
 
         return res.status(200).json({
             success:true,
             message:'MFA verification successful',
-            token,
-            refreshToken,
             user:{
                 id:user._id,
                 email:user.email,
                 role:user.role,
-                isVerified:user.isVerified
+                isVerified:user.isVerified,
+                adminApproved:user.adminApproved,
+                isSuperAdmin:user.isSuperAdmin,
+                emailVerified:user.emailVerified
             }
         });
     }catch(error){
@@ -410,7 +544,7 @@ const verifyOtp=async(req,res)=>{
 
 const refreshAccessToken=async(req,res)=>{
     try{
-        const { refreshToken }=req.body;
+        const refreshToken=req.body?.refreshToken || req.cookies?.sw_refresh_token;
         if(!refreshToken){
             return res.status(400).json({
                 success:false,
@@ -439,12 +573,11 @@ const refreshAccessToken=async(req,res)=>{
         const newRefreshToken=await issueRefreshToken(user._id.toString());
 
         await revokeRefreshTokenRecord(validated.tokenRecord,hashToken(newRefreshToken));
+        setAuthCookies(res,{ accessToken, refreshToken:newRefreshToken });
 
         return res.status(200).json({
             success:true,
-            message:'Token refreshed successfully',
-            token:accessToken,
-            refreshToken:newRefreshToken
+            message:'Token refreshed successfully'
         });
     }catch(error){
         return res.status(500).json({
@@ -457,8 +590,9 @@ const refreshAccessToken=async(req,res)=>{
 
 const logout=async(req,res)=>{
     try{
-        const { refreshToken }=req.body;
+        const refreshToken=req.body?.refreshToken || req.cookies?.sw_refresh_token;
         if(!refreshToken){
+            clearAuthCookies(res);
             return res.status(400).json({
                 success:false,
                 message:'refreshToken is required'
@@ -467,6 +601,7 @@ const logout=async(req,res)=>{
 
         const validated=await validateStoredRefreshToken(refreshToken);
         if(validated.error){
+            clearAuthCookies(res);
             return res.status(200).json({
                 success:true,
                 message:'Session already invalid'
@@ -474,6 +609,7 @@ const logout=async(req,res)=>{
         }
 
         await revokeRefreshTokenRecord(validated.tokenRecord);
+        clearAuthCookies(res);
 
         return res.status(200).json({
             success:true,
@@ -500,6 +636,7 @@ const logoutAll=async(req,res)=>{
                 $set:{ revokedAt:new Date() }
             }
         );
+        clearAuthCookies(res);
 
         return res.status(200).json({
             success:true,
@@ -516,7 +653,7 @@ const logoutAll=async(req,res)=>{
 
 const getMe=async(req,res)=>{
     try{
-        const user=await User.findById(req.user.id).select('-password');
+        const user=await User.findById(req.user.id).select('-password -adminMfaSecret -adminMfaTempSecret');
         if(!user){
             return res.status(404).json({
                 success:false,
@@ -537,6 +674,311 @@ const getMe=async(req,res)=>{
     }
 };
 
+const verifyEmail=async(req,res)=>{
+    try{
+        const token=req.body?.token || req.query?.token;
+        if(!token){
+            return res.status(400).json({
+                success:false,
+                message:'Verification token is required'
+            });
+        }
+
+        let decoded;
+        try{
+            decoded=jwt.verify(token,process.env.JWT_SECRET);
+        }catch(error){
+            return res.status(401).json({
+                success:false,
+                message:'Invalid or expired verification token'
+            });
+        }
+
+        if(decoded.purpose !== 'email-verify' || !decoded.id){
+            return res.status(401).json({
+                success:false,
+                message:'Invalid verification token payload'
+            });
+        }
+
+        const user=await User.findById(decoded.id);
+        if(!user){
+            return res.status(404).json({
+                success:false,
+                message:'User not found'
+            });
+        }
+
+        if(user.emailVerified){
+            return res.status(200).json({
+                success:true,
+                message:'Email already verified'
+            });
+        }
+
+        const tokenHash=hashToken(token);
+        if(
+            !user.emailVerificationTokenHash ||
+            user.emailVerificationTokenHash !== tokenHash ||
+            (user.emailVerificationExpiresAt && user.emailVerificationExpiresAt < new Date())
+        ){
+            return res.status(401).json({
+                success:false,
+                message:'Invalid or expired verification token'
+            });
+        }
+
+        user.emailVerified=true;
+        user.emailVerificationTokenHash=null;
+        user.emailVerificationExpiresAt=null;
+        await user.save();
+
+        return res.status(200).json({
+            success:true,
+            message:'Email verified successfully. You can now login.'
+        });
+    }catch(error){
+        return res.status(500).json({
+            success:false,
+            message:'Internal server error',
+            error:error.message
+        });
+    }
+};
+
+const resendVerification=async(req,res)=>{
+    try{
+        const { email }=req.body;
+        if(!email){
+            return res.status(400).json({
+                success:false,
+                message:'Email is required'
+            });
+        }
+
+        const normalizedEmail=normalizeEmail(email);
+        const user=await User.findOne({ email:normalizedEmail });
+        if(!user){
+            return res.status(200).json({
+                success:true,
+                message:'If this email exists, a verification mail has been sent.'
+            });
+        }
+
+        if(user.emailVerified){
+            return res.status(200).json({
+                success:true,
+                message:'Email already verified.'
+            });
+        }
+
+        const verifyToken=createEmailVerificationToken(user._id.toString());
+        user.emailVerificationTokenHash=hashToken(verifyToken);
+        const decoded=jwt.decode(verifyToken);
+        user.emailVerificationExpiresAt=new Date(decoded.exp * 1000);
+        await user.save();
+
+        const verificationUrl=`${FRONTEND_URL}/login?verifyToken=${encodeURIComponent(verifyToken)}`;
+        await sendEmailVerificationEmail({
+            to:user.email,
+            firstName:user.firstName,
+            verificationUrl
+        });
+
+        return res.status(200).json({
+            success:true,
+            message:'Verification email sent.'
+        });
+    }catch(error){
+        return res.status(500).json({
+            success:false,
+            message:'Internal server error',
+            error:error.message
+        });
+    }
+};
+
+const getAdminMfaStatus=async(req,res)=>{
+    try{
+        if(req.user.role !== 'admin'){
+            return res.status(403).json({
+                success:false,
+                message:'Admin role required'
+            });
+        }
+
+        const user=await User.findById(req.user.id).select('adminMfaEnabled');
+
+        return res.status(200).json({
+            success:true,
+            adminMfaEnabled:!!user?.adminMfaEnabled
+        });
+    }catch(error){
+        return res.status(500).json({
+            success:false,
+            message:'Internal server error',
+            error:error.message
+        });
+    }
+};
+
+const setupAdminMfa=async(req,res)=>{
+    try{
+        if(req.user.role !== 'admin'){
+            return res.status(403).json({
+                success:false,
+                message:'Admin role required'
+            });
+        }
+
+        const user=await User.findById(req.user.id);
+        if(!user){
+            return res.status(404).json({
+                success:false,
+                message:'User not found'
+            });
+        }
+
+        const secret=speakeasy.generateSecret({
+            name:`ShieldWrite (${user.email})`,
+            issuer:'ShieldWrite',
+            length:20
+        });
+
+        user.adminMfaTempSecret=secret.base32;
+        await user.save();
+
+        const qrCodeDataUrl=await QRCode.toDataURL(secret.otpauth_url);
+
+        return res.status(200).json({
+            success:true,
+            message:'Scan QR in Google Authenticator and confirm with a TOTP code',
+            manualKey:secret.base32,
+            qrCodeDataUrl
+        });
+    }catch(error){
+        return res.status(500).json({
+            success:false,
+            message:'Internal server error',
+            error:error.message
+        });
+    }
+};
+
+const enableAdminMfa=async(req,res)=>{
+    try{
+        if(req.user.role !== 'admin'){
+            return res.status(403).json({
+                success:false,
+                message:'Admin role required'
+            });
+        }
+
+        const { token }=req.body;
+        if(!token){
+            return res.status(400).json({
+                success:false,
+                message:'TOTP token is required'
+            });
+        }
+
+        const user=await User.findById(req.user.id);
+        if(!user || !user.adminMfaTempSecret){
+            return res.status(400).json({
+                success:false,
+                message:'MFA setup not initialized. Call setup first.'
+            });
+        }
+
+        const verified=speakeasy.totp.verify({
+            secret:user.adminMfaTempSecret,
+            encoding:'base32',
+            token:String(token),
+            window:1
+        });
+
+        if(!verified){
+            return res.status(401).json({
+                success:false,
+                message:'Invalid TOTP token'
+            });
+        }
+
+        user.adminMfaSecret=user.adminMfaTempSecret;
+        user.adminMfaTempSecret=null;
+        user.adminMfaEnabled=true;
+        await user.save();
+
+        return res.status(200).json({
+            success:true,
+            message:'Google Authenticator enabled for admin actions'
+        });
+    }catch(error){
+        return res.status(500).json({
+            success:false,
+            message:'Internal server error',
+            error:error.message
+        });
+    }
+};
+
+const disableAdminMfa=async(req,res)=>{
+    try{
+        if(req.user.role !== 'admin'){
+            return res.status(403).json({
+                success:false,
+                message:'Admin role required'
+            });
+        }
+
+        const { token }=req.body;
+        if(!token){
+            return res.status(400).json({
+                success:false,
+                message:'TOTP token is required'
+            });
+        }
+
+        const user=await User.findById(req.user.id);
+        if(!user || !user.adminMfaEnabled || !user.adminMfaSecret){
+            return res.status(400).json({
+                success:false,
+                message:'Admin MFA is not enabled'
+            });
+        }
+
+        const verified=speakeasy.totp.verify({
+            secret:user.adminMfaSecret,
+            encoding:'base32',
+            token:String(token),
+            window:1
+        });
+
+        if(!verified){
+            return res.status(401).json({
+                success:false,
+                message:'Invalid TOTP token'
+            });
+        }
+
+        user.adminMfaEnabled=false;
+        user.adminMfaSecret=null;
+        user.adminMfaTempSecret=null;
+        await user.save();
+
+        return res.status(200).json({
+            success:true,
+            message:'Google Authenticator disabled for admin actions'
+        });
+    }catch(error){
+        return res.status(500).json({
+            success:false,
+            message:'Internal server error',
+            error:error.message
+        });
+    }
+};
+
 module.exports={
     signup,
     login,
@@ -544,5 +986,11 @@ module.exports={
     getMe,
     refreshAccessToken,
     logout,
-    logoutAll
+    logoutAll,
+    getAdminMfaStatus,
+    setupAdminMfa,
+    enableAdminMfa,
+    disableAdminMfa,
+    verifyEmail,
+    resendVerification
 };

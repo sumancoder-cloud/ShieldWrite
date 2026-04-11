@@ -1,6 +1,6 @@
 const express=require('express');
 const router=express.Router();
-const {auth,authorize}=require('../middleware/auth.middleware');
+const {auth,authorize,requireAdminTotp}=require('../middleware/auth.middleware');
 const {
     createBlog,
     listBlogs,
@@ -15,8 +15,8 @@ router.use(auth,authorize('user','admin'));
 router.post('/',createBlog);
 router.get('/',listBlogs);
 router.get('/:id',getBlogById);
-router.put('/:id',updateBlog);
-router.delete('/:id',deleteBlog);
+router.put('/:id',requireAdminTotp,updateBlog);
+router.delete('/:id',requireAdminTotp,deleteBlog);
 router.patch('/:id/like',likeBlog);
 
 module.exports=router;

@@ -6,6 +6,12 @@ const canManageResource=(resourceAuthorId,requestUser)=>{
     return isOwner || isAdmin;
 };
 
+const canViewResource=(resourceAuthorId,requestUser)=>{
+    const isOwner=resourceAuthorId.toString() === requestUser.id;
+    const isAdmin=requestUser.role === 'admin';
+    return isOwner || isAdmin;
+};
+
 const createBlog=async(req,res)=>{
     try{
         const {title,content,status}=req.body;
@@ -70,7 +76,7 @@ const getBlogById=async(req,res)=>{
             });
         }
 
-        if(!canManageResource(blog.author._id,req.user)){
+        if(!canViewResource(blog.author._id,req.user)){
             return res.status(403).json({
                 success:false,
                 message:'Not allowed to view this blog'
@@ -173,13 +179,6 @@ const likeBlog=async(req,res)=>{
             return res.status(404).json({
                 success:false,
                 message:'Blog not found'
-            });
-        }
-
-        if(!canManageResource(blog.author,req.user)){
-            return res.status(403).json({
-                success:false,
-                message:'Not allowed to interact with this blog'
             });
         }
 
