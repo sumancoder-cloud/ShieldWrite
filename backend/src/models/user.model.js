@@ -32,6 +32,38 @@ const userSchema=new mongoose.Schema(
             enum:["user","admin"],
             default:"user"
         },
+        adminApproved:{
+            type:Boolean,
+            default:true
+        },
+        isSuperAdmin:{
+            type:Boolean,
+            default:false
+        },
+        adminMfaEnabled:{
+            type:Boolean,
+            default:false
+        },
+        adminMfaSecret:{
+            type:String,
+            default:null
+        },
+        adminMfaTempSecret:{
+            type:String,
+            default:null
+        },
+        emailVerified:{
+            type:Boolean,
+            default:false
+        },
+        emailVerificationTokenHash:{
+            type:String,
+            default:null
+        },
+        emailVerificationExpiresAt:{
+            type:Date,
+            default:null
+        },
         isVerified:{
             type:Boolean,
             default:false,
@@ -44,7 +76,7 @@ const userSchema=new mongoose.Schema(
             type:Boolean,
             default:false
         },
-        lockuntil:{
+        lockUntil:{
             type:Date,
             default:null
         }

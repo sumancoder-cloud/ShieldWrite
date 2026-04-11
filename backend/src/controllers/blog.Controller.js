@@ -1,159 +1,209 @@
-let Blog=require('../models/blog.model');
-let User = require('../models/user.model');
+const Blog=require('../models/blog.model');
 
-const writeBlog=async(req,res)=>{
-    try{    
-        const {title,content,author}=req.body;
-        if(!title || !content ||!author){
-           return res.status(400).json({
+const canManageResource=(resourceAuthorId,requestUser)=>{
+    const isOwner=resourceAuthorId.toString() === requestUser.id;
+    const isAdmin=requestUser.role === 'admin';
+    return isOwner || isAdmin;
+};
+
+const canViewResource=(resourceAuthorId,requestUser)=>{
+    const isOwner=resourceAuthorId.toString() === requestUser.id;
+    const isAdmin=requestUser.role === 'admin';
+    return isOwner || isAdmin;
+};
+
+const createBlog=async(req,res)=>{
+    try{
+        const {title,content,status}=req.body;
+        if(!title || !content){
+            return res.status(400).json({
                 success:false,
-                message:"Required Details must provide"
-            })
+                message:'title and content are required'
+            });
         }
-        const newBlog=new Blog({
-            title,
-            content,
-            author
-        })
 
-
-        const blogTitle=await Blog.findOne({title})
-
-       console.log(blogTitle);
-
-        await newBlog.save();
-
+        const blog=await Blog.create({
+            title:String(title).trim(),
+            content:String(content).trim(),
+            status:status === 'published' ? 'published' : 'draft',
+            author:req.user.id
+        });
 
         return res.status(201).json({
             success:true,
-            message:"Content is posted successFully...!",
-            blog:newBlog,
-           
-        })
-        
-
-    }catch(error){
-       return  res.status(500).json({
-            success:false,
-            message:"Internal Server Error",
-            err:error.message
-        })
-    }
-}
-
-const getBlog=async(req,res)=>{
-    try{
-        const id=req.params.id;
-        const found=await Blog.findById(id);
-        if(found){
-            return res.status(200).json({
-                success:true,
-                message:"Blog Details Found",
-                blog:found
-            })
-        }else{
-            return res.status(400).json({
-                success:false,
-                message:"Details are not found"
-            })
-        }
+            message:'Blog created successfully',
+            blog
+        });
     }catch(error){
         return res.status(500).json({
             success:false,
-            message:"Internal server Error",
-            mes:error.message
-        })
+            message:'Internal server error',
+            error:error.message
+        });
     }
-}
+};
+
+const listBlogs=async(req,res)=>{
+    try{
+        const query=req.user.role === 'admin' ? {} : { author:req.user.id };
+        const blogs=await Blog.find(query)
+            .populate('author','firstName lastName email role')
+            .sort({ createdAt:-1 });
+
+        return res.status(200).json({
+            success:true,
+            count:blogs.length,
+            blogs
+        });
+    }catch(error){
+        return res.status(500).json({
+            success:false,
+            message:'Internal server error',
+            error:error.message
+        });
+    }
+};
+
+const getBlogById=async(req,res)=>{
+    try{
+        const blog=await Blog.findById(req.params.id)
+            .populate('author','firstName lastName email role');
+
+        if(!blog){
+            return res.status(404).json({
+                success:false,
+                message:'Blog not found'
+            });
+        }
+
+        if(!canViewResource(blog.author._id,req.user)){
+            return res.status(403).json({
+                success:false,
+                message:'Not allowed to view this blog'
+            });
+        }
+
+        return res.status(200).json({
+            success:true,
+            blog
+        });
+    }catch(error){
+        return res.status(500).json({
+            success:false,
+            message:'Internal server error',
+            error:error.message
+        });
+    }
+};
 
 const updateBlog=async(req,res)=>{
     try{
-    const id=req.params.id;
-    const data=req.body;
-    const found=await Blog.findById(id);
-    if(found.author.id!==req.user.id){
-        return res.status(403).json({
-            success:false,
-            message: "You are not allowed to update this blog"
+        const blog=await Blog.findById(req.params.id);
+        if(!blog){
+            return res.status(404).json({
+                success:false,
+                message:'Blog not found'
+            });
+        }
 
-        })
-    }
-    if(found){
-        Object.assign(found,data);
-        await found.save();
+        if(!canManageResource(blog.author,req.user)){
+            return res.status(403).json({
+                success:false,
+                message:'You are not allowed to update this blog'
+            });
+        }
+
+        const {title,content,status}=req.body;
+        if(title !== undefined){
+            blog.title=String(title).trim();
+        }
+        if(content !== undefined){
+            blog.content=String(content).trim();
+        }
+        if(status !== undefined && ['draft','published'].includes(status)){
+            blog.status=status;
+        }
+
+        await blog.save();
+
         return res.status(200).json({
             success:true,
-            message:"Blog Updated SuccessFully",
-            mes:found
-
-        })
-    }else{
-        return res.status(400).json({
-            success:false,
-            message:"Details are not Found"
-        })
-    }
+            message:'Blog updated successfully',
+            blog
+        });
     }catch(error){
         return res.status(500).json({
             success:false,
-            message:"Internal Server Error",
-            err:error.message
-        })
+            message:'Internal server error',
+            error:error.message
+        });
     }
-}
+};
 
 const deleteBlog=async(req,res)=>{
     try{
-        const id=req.params.id;
-        const deleted=await Blog.filterByIdAndDelete(id);
-        if(Blog.author.toString()!==req.user.id){
-            return res.statsu(403).json({
+        const blog=await Blog.findById(req.params.id);
+        if(!blog){
+            return res.status(404).json({
+                success:false,
+                message:'Blog not found'
+            });
+        }
 
-                
+        if(!canManageResource(blog.author,req.user)){
+            return res.status(403).json({
                 success:false,
-                message:"You are not allowed to delete this blog"
-            })
+                message:'You are not allowed to delete this blog'
+            });
         }
-        if(!deleted){
-            return res.status(400).json({
-                success:false,
-                message:"Blog is not Found"
-            })
-        }
+
+        await blog.deleteOne();
+
         return res.status(200).json({
             success:true,
-            message:"Blog Deleted SuccessFully...!"
-        })
+            message:'Blog deleted successfully'
+        });
     }catch(error){
         return res.status(500).json({
             success:false,
-            message:"Internal Server Error",
-            err:error.message
-        })
+            message:'Internal server error',
+            error:error.message
+        });
     }
-}
+};
 
-const likes=async(req,res)=>{
+const likeBlog=async(req,res)=>{
     try{
-        const id=req.params.id;
-        const found=await Blog.findById(id);
-        if(found){
-            found.likes+=1;
-            await found.save();
-            res.status(200).json({
-                success:true,
-                message:"Likes are updated",
-                likes:found.likes
-            })
-        }else{
-            return res.status(400).json({
+        const blog=await Blog.findById(req.params.id);
+        if(!blog){
+            return res.status(404).json({
                 success:false,
-                message:"Error at likes api endpoint"
-            })
+                message:'Blog not found'
+            });
         }
+
+        blog.likes += 1;
+        await blog.save();
+
+        return res.status(200).json({
+            success:true,
+            message:'Like added',
+            likes:blog.likes
+        });
     }catch(error){
-
+        return res.status(500).json({
+            success:false,
+            message:'Internal server error',
+            error:error.message
+        });
     }
-}
+};
 
-module.exports={writeBlog,likes,getBlog,updateBlog,deleteBlog};
+module.exports={
+    createBlog,
+    listBlogs,
+    getBlogById,
+    updateBlog,
+    deleteBlog,
+    likeBlog
+};
