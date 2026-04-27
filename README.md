@@ -210,7 +210,7 @@ npm start
 - Add Docker-based deployment
 
 ## Author
-Suman Yadav
+Suman Yadav,charan,mohan
 
 ## Note
 ShieldWrite is a security-first learning project that mirrors real-world authentication design and backend hardening patterns.
